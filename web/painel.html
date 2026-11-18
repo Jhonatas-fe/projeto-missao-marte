@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Painel de Controle ECLSS – Missão Marte</title>
+  <style>
+    :root { --fundo: #1b0f0c; --cartao: #2b1a15; --texto: #f4e9e4; --marte: #d2582c;
+            --ok: #3fb27f; --alerta: #e0a526; --critico: #e04848; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--fundo); color: var(--texto); }
+    header { padding: 16px 24px; border-bottom: 3px solid var(--marte); }
+    h1 { margin: 0; font-size: 1.4rem; }
+    main { max-width: 900px; margin: 24px auto; padding: 0 16px; display: grid; gap: 16px;
+           grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    section { background: var(--cartao); border-radius: 10px; padding: 16px; }
+    .valor { font-size: 2rem; font-weight: 700; }
+    #status-habitat { font-weight: 700; padding: 4px 10px; border-radius: 6px; display: inline-block; }
+    .NORMAL { background: var(--ok); } .ALERTA { background: var(--alerta); color: #000; }
+    .CRITICO { background: var(--critico); }
+    label { display: block; margin-top: 10px; }
+    input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #555; margin-top: 4px; }
+    button { margin-top: 14px; padding: 10px 16px; border: 0; border-radius: 6px; background: var(--marte);
+             color: #fff; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #mensagem { display: none; margin-top: 14px; padding: 10px; border-radius: 6px; }
+    #mensagem.processando { display: block; background: #444; }
+    #mensagem.sucesso { display: block; background: var(--ok); }
+    #mensagem.erro { display: block; background: var(--critico); }
+  </style>
+</head>
+<body>
+  <header><h1>PainelControleWeb · ECLSS · Habitat Marte</h1></header>
+  <main>
+    <section>
+      <h2>Recursos</h2>
+      <p>Oxigênio (kg): <span class="valor" id="nivel-oxigenio"></span></p>
+      <p>Água (L): <span class="valor" id="nivel-agua"></span></p>
+      <p>Status do habitat: <span id="status-habitat"></span></p>
+    </section>
+    <section>
+      <h2>Solicitar cota extra de O2</h2>
+      <form id="form-solicitacao" novalidate>
+        <label for="astronauta">Astronauta</label>
+        <input id="astronauta" name="astronauta" type="text" autocomplete="off">
+        <label for="quantidade">Quantidade (kg)</label>
+        <input id="quantidade" name="quantidade" type="text" inputmode="decimal">
+        <button id="btn-solicitar" type="submit">Solicitar</button>
+      </form>
+      <div id="mensagem" role="status"></div>
+    </section>
+  </main>
+  <script>
+    // Mesmos parâmetros de config/habitat.json e das constantes de src/gerenciador_recursos.py
+    const CONSUMO_O2_KG_DIA = 0.84;
+    const LIMITE_CRITICO_DIAS = 3;
+    const LIMITE_ALERTA_DIAS = 7;
+    const LATENCIA_MS = 1500; // latência proposital (simula o link com o habitat)
+    const habitat = { oxigenio: 50.0, agua: 200.0, astronautas: 4 };
+
+    const el = (id) => document.getElementById(id);
+
+    function statusAtual() {
+      const autonomia = habitat.oxigenio / (habitat.astronautas * CONSUMO_O2_KG_DIA);
+      if (autonomia < LIMITE_CRITICO_DIAS) return ["CRÍTICO", "CRITICO"];
+      if (autonomia < LIMITE_ALERTA_DIAS) return ["ALERTA", "ALERTA"];
+      return ["NORMAL", "NORMAL"];
+    }
+
+    function renderizar() {
+      el("nivel-oxigenio").textContent = habitat.oxigenio.toFixed(2);
+      el("nivel-agua").textContent = habitat.agua.toFixed(2);
+      const [texto, classe] = statusAtual();
+      el("status-habitat").textContent = texto;
+      el("status-habitat").className = classe;
+    }
+
+    function mostrarMensagem(texto, tipo) {
+      el("mensagem").textContent = texto;
+      el("mensagem").className = tipo;
+    }
+
+    function validar(astronauta, quantidadeTexto) {
+      if (!astronauta) return "Erro: informe o nome do astronauta.";
+      const quantidade = Number(quantidadeTexto.replace(",", "."));
+      if (quantidadeTexto.trim() === "" || !Number.isFinite(quantidade) || quantidade <= 0)
+        return "Erro: a quantidade deve ser um número positivo.";
+      if (quantidade > habitat.oxigenio)
+        return "Erro: oxigênio insuficiente no estoque.";
+      return null;
+    }
+
+    el("form-solicitacao").addEventListener("submit", (evento) => {
+      evento.preventDefault();
+      const astronauta = el("astronauta").value.trim();
+      const quantidadeTexto = el("quantidade").value;
+      el("btn-solicitar").disabled = true;
+      mostrarMensagem("Processando solicitação...", "processando");
+
+      setTimeout(() => {
+        const erro = validar(astronauta, quantidadeTexto);
+        if (erro) {
+          mostrarMensagem(erro, "erro");
+        } else {
+          const quantidade = Number(quantidadeTexto.replace(",", "."));
+          habitat.oxigenio = Math.round((habitat.oxigenio - quantidade) * 1000) / 1000;
+          renderizar();
+          mostrarMensagem(`Cota extra de ${quantidade.toFixed(2)} kg de O2 liberada para ${astronauta}.`, "sucesso");
+        }
+        el("btn-solicitar").disabled = false;
+      }, LATENCIA_MS);
+    });
+
+    renderizar();
+  </script>
+</body>
+</html>

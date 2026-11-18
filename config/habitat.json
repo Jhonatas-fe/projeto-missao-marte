@@ -1,0 +1,6 @@
+{
+  "estoque_oxigenio_kg": 50.0,
+  "estoque_agua_l": 200.0,
+  "num_astronautas": 4,
+  "limite_autonomia_critica_dias": 3
+}
