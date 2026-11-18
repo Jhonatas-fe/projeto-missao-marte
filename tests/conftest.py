@@ -84,11 +84,6 @@ def driver():
     navegador.quit()
 
 
-@pytest.fixture
-def url_painel():
-    return (RAIZ_PROJETO / "web" / "painel.html").resolve().as_uri()
-
-
 def salvar_screenshot(navegador, nome: str) -> Path:
     """Salva screenshots/<nome>.png (cria a pasta se necessário)."""
     PASTA_SCREENSHOTS.mkdir(exist_ok=True)
