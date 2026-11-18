@@ -5,6 +5,7 @@ A telemetria é SEMPRE um mock (fixture `telemetria_mock`): o serviço real nunc
 """
 
 import pytest
+import requests
 
 from src.gerenciador_recursos import (
     CONSUMO_AGUA_L_DIA,
@@ -16,6 +17,7 @@ from src.gerenciador_recursos import (
     ParametroInvalidoError,
     RecursoMarteError,
 )
+from src.servico_telemetria import ServicoTelemetriaEspacial
 
 
 # =================================================================== fixtures
@@ -299,3 +301,182 @@ def test_fluxo_solicitacoes_sucessivas_ate_esgotar(gerenciador):
         gerenciador.validar_estoque()
     with pytest.raises(OxigenioInsuficienteError):
         gerenciador.solicitar_cota_extra_oxigenio("Carla", 0.1)
+
+
+# ============================================================================
+# MOCKS (pytest-mock): telemetria com a estação na Terra
+# ============================================================================
+MENSAGEM_CRISE_BRUNO = (
+    "Autonomia de oxigênio crítica: 2.68 dias restantes após cota extra de 41.00 kg para Bruno"
+)
+
+
+def test_telemetria_mock_respeita_spec(telemetria_mock):
+    """Com spec=ServicoTelemetriaEspacial, métodos inexistentes geram AttributeError."""
+    with pytest.raises(AttributeError):
+        telemetria_mock.metodo_que_nao_existe()
+
+
+def test_crise_dispara_alerta_com_argumentos_exatos(gerenciador, telemetria_mock):
+    resultado = gerenciador.solicitar_cota_extra_oxigenio("Bruno", 41)
+
+    telemetria_mock.disparar_alerta_crise.assert_called_once_with("CRITICO", MENSAGEM_CRISE_BRUNO)
+    assert resultado["alerta_disparado"] is True
+    assert resultado["estoque_oxigenio"] == 9.0
+
+
+def test_condicao_normal_nao_dispara_alerta(gerenciador, telemetria_mock):
+    gerenciador.solicitar_cota_extra_oxigenio("Ana", 5)
+
+    telemetria_mock.disparar_alerta_crise.assert_not_called()
+    telemetria_mock.enviar_relatorio_status.assert_not_called()
+
+
+def test_cota_recusada_nao_contata_a_terra(gerenciador, telemetria_mock):
+    with pytest.raises(OxigenioInsuficienteError):
+        gerenciador.solicitar_cota_extra_oxigenio("Ana", 99)
+    telemetria_mock.disparar_alerta_crise.assert_not_called()
+
+
+def test_alerta_sem_link_com_a_terra_fica_pendente(gerenciador, telemetria_mock):
+    telemetria_mock.disparar_alerta_crise.side_effect = ConnectionError("Sem link com a Terra")
+
+    resultado = gerenciador.solicitar_cota_extra_oxigenio("Bruno", 41)
+
+    telemetria_mock.disparar_alerta_crise.assert_called_once_with("CRITICO", MENSAGEM_CRISE_BRUNO)
+    assert resultado["alerta_disparado"] is False
+    assert gerenciador.alertas_pendentes == [("CRITICO", MENSAGEM_CRISE_BRUNO)]
+
+
+def test_alerta_nao_confirmado_pela_estacao(gerenciador, telemetria_mock):
+    telemetria_mock.disparar_alerta_crise.return_value = False
+
+    resultado = gerenciador.solicitar_cota_extra_oxigenio("Bruno", 41)
+
+    assert resultado["alerta_disparado"] is False
+    assert gerenciador.alertas_pendentes == []
+
+
+def test_cada_cota_critica_gera_um_alerta(gerenciador, telemetria_mock):
+    gerenciador.solicitar_cota_extra_oxigenio("Bruno", 41)
+    gerenciador.solicitar_cota_extra_oxigenio("Carla", 4)
+
+    assert telemetria_mock.disparar_alerta_crise.call_count == 2
+    telemetria_mock.disparar_alerta_crise.assert_called_with(
+        "CRITICO", "Autonomia de oxigênio crítica: 1.49 dias restantes após cota extra de 4.00 kg para Carla"
+    )
+
+
+@pytest.mark.parametrize(
+    "resposta_estacao, status_esperado",
+    [
+        ({"status": "RECEBIDO", "protocolo": "TERRA-4242"}, "ENVIADO"),
+        ({"status": "RECUSADO", "motivo": "checksum inválido"}, "REJEITADO"),
+        (None, "REJEITADO"),
+    ],
+    ids=["recebido", "recusado", "resposta-vazia"],
+)
+def test_gerar_relatorio_trata_resposta_da_estacao(gerenciador, telemetria_mock, resposta_estacao, status_esperado):
+    telemetria_mock.enviar_relatorio_status.return_value = resposta_estacao
+
+    relatorio = gerenciador.gerar_relatorio()
+
+    telemetria_mock.enviar_relatorio_status.assert_called_once_with(relatorio["dados"])
+    assert relatorio["status"] == status_esperado
+
+
+def test_gerar_relatorio_sem_link_fica_pendente(gerenciador, telemetria_mock):
+    telemetria_mock.enviar_relatorio_status.side_effect = ConnectionError("Sem link com a Terra: tempestade de poeira")
+
+    relatorio = gerenciador.gerar_relatorio()
+
+    assert relatorio["status"] == "PENDENTE"
+    assert "tempestade de poeira" in relatorio["erro"]
+    telemetria_mock.enviar_relatorio_status.assert_called_once()
+
+
+def test_patch_object_no_servico_real(mocker):
+    """mocker.patch.object: instância REAL do serviço com só o método de alerta substituído."""
+    servico = ServicoTelemetriaEspacial()
+    alerta = mocker.patch.object(ServicoTelemetriaEspacial, "disparar_alerta_crise", return_value=True)
+    habitat = GerenciadorRecursosMarte(50.0, 200.0, 4, servico)
+
+    habitat.solicitar_cota_extra_oxigenio("Bruno", 41)
+
+    alerta.assert_called_once_with("CRITICO", MENSAGEM_CRISE_BRUNO)
+
+
+def test_servico_real_nunca_alcanca_a_rede():
+    """Sem mock, a fixture autouse `bloquear_rede` corta a conexão: nada sai do teste."""
+    with pytest.raises(ConnectionError, match="Sem link com a Terra"):
+        ServicoTelemetriaEspacial().enviar_relatorio_status({"teste": True})
+
+
+# ------------------------------- ServicoTelemetriaEspacial com requests.post mockado
+@pytest.fixture
+def post_mock(mocker):
+    return mocker.patch("src.servico_telemetria.requests.post")
+
+
+def test_enviar_relatorio_status_via_http(post_mock):
+    post_mock.return_value.json.return_value = {"status": "RECEBIDO", "protocolo": "TERRA-0007"}
+    servico = ServicoTelemetriaEspacial(url_base="https://terra.test/api/", timeout=2.0)
+
+    resposta = servico.enviar_relatorio_status({"estoque_oxigenio": 50.0})
+
+    post_mock.assert_called_once_with(
+        "https://terra.test/api/relatorios", json={"estoque_oxigenio": 50.0}, timeout=2.0
+    )
+    post_mock.return_value.raise_for_status.assert_called_once_with()
+    assert resposta == {"status": "RECEBIDO", "protocolo": "TERRA-0007"}
+
+
+@pytest.mark.parametrize(
+    "erro",
+    [requests.exceptions.ConnectionError("link caiu"), requests.exceptions.Timeout("sem resposta")],
+    ids=["conexao", "timeout"],
+)
+def test_enviar_relatorio_falha_de_rede(post_mock, erro):
+    post_mock.side_effect = erro
+    with pytest.raises(ConnectionError, match="Sem link com a Terra"):
+        ServicoTelemetriaEspacial().enviar_relatorio_status({})
+
+
+def test_enviar_relatorio_erro_http(post_mock):
+    post_mock.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
+    with pytest.raises(ConnectionError, match="Sem link com a Terra: 500"):
+        ServicoTelemetriaEspacial().enviar_relatorio_status({})
+
+
+def test_enviar_relatorio_exige_dicionario(post_mock):
+    with pytest.raises(TypeError):
+        ServicoTelemetriaEspacial().enviar_relatorio_status(["não", "é", "dict"])
+    post_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status_http, confirmado",
+    [(200, True), (202, True), (500, False), (404, False)],
+    ids=["200", "202", "500", "404"],
+)
+def test_disparar_alerta_crise_via_http(post_mock, status_http, confirmado):
+    post_mock.return_value.status_code = status_http
+
+    assert ServicoTelemetriaEspacial().disparar_alerta_crise("CRITICO", "O2 baixo") is confirmado
+    post_mock.assert_called_once_with(
+        "https://estacao-terra.missao-marte.invalid/api/alertas",
+        json={"nivel": "CRITICO", "mensagem": "O2 baixo"},
+        timeout=5.0,
+    )
+
+
+def test_disparar_alerta_sem_link(post_mock):
+    post_mock.side_effect = requests.exceptions.ConnectionError("antena danificada")
+    with pytest.raises(ConnectionError, match="antena danificada"):
+        ServicoTelemetriaEspacial().disparar_alerta_crise("ALERTA", "teste")
+
+
+def test_disparar_alerta_nivel_desconhecido(post_mock):
+    with pytest.raises(ValueError, match="Nível de alerta desconhecido"):
+        ServicoTelemetriaEspacial().disparar_alerta_crise("NORMAL", "teste")
+    post_mock.assert_not_called()
